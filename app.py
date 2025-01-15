@@ -11,11 +11,31 @@ import io
 # Initialize Sentence Transformer model for embeddings
 model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
-# Function to load a Word document from uploaded file
+# Function to load a Word document and return the text
 def load_docx(file):
     doc = Document(io.BytesIO(file.getvalue()))  # Read the bytes from the uploaded file
     text = [para.text for para in doc.paragraphs if para.text.strip() != '']
     return text
+
+# Chunk text into larger blocks (e.g., ~500 words or 2000 characters per chunk)
+def chunk_text(text_list, chunk_size=2000):
+    chunks = []
+    current_chunk = ""
+
+    for paragraph in text_list:
+        # Add paragraph to the current chunk
+        if len(current_chunk) + len(paragraph) <= chunk_size:
+            current_chunk += f"{paragraph} "
+        else:
+            # Save the current chunk and start a new one
+            chunks.append(current_chunk.strip())
+            current_chunk = f"{paragraph} "
+
+    # Add the last chunk if not empty
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks
 
 # Convert text to embeddings
 def create_embeddings(text_list):
@@ -37,8 +57,12 @@ def load_embeddings_and_index(embeddings_file="embeddings.pkl", index_file="inde
 
 # Function to process and save the document (only run once for the document)
 def process_and_save_document(file):
+    # Load and chunk the document text
     doc_text = load_docx(file)
-    doc_embeddings = create_embeddings(doc_text)
+    doc_chunks = chunk_text(doc_text, chunk_size=2000)  # Adjust `chunk_size` as needed
+
+    # Create embeddings for the chunks
+    doc_embeddings = create_embeddings(doc_chunks)
     
     # Create FAISS index
     index = faiss.IndexFlatL2(doc_embeddings.shape[1])
@@ -47,29 +71,32 @@ def process_and_save_document(file):
     # Save embeddings and index
     save_embeddings_and_index(doc_embeddings, index)
 
+    # Optionally return the chunks for debugging
+    return doc_chunks
+
 # Function to call the ArliAI API for generating responses
 def call_arli_api(user_input, context, api_key):
     url = "https://api.arliai.com/v1/chat/completions"
     
-    # Ensure context is directly related to the document, guiding the assistant to provide fact-based answers
+    # Ensure context is directly related to the document
     system_message = (
-        "You are a helpful assistant. Please answer the user's question using only the information from the provided document. "
+        "You are a helpful assistant. Please answer the user's question using only the information from the provided extract. "
         "Do not invent any information or hallucinate. Stick strictly to the content in the document."
     )
     
     # Prepare the API payload
     payload = json.dumps({
-        "model": "Mistral-Nemo-12B-Instruct-2407",  # Replace with the model you want to use
+        "model": "Mistral-Nemo-12B-Instruct-2407",  # Replace with the desired model
         "messages": [
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": "How can I help you with that?"},  # Placeholder assistant response
             {"role": "user", "content": context}  # Provide the relevant context from the document
         ],
-        "temperature": 0.01,  # Lower temperature for deterministic responses
-        "max_tokens": 150,  # Set a reasonable limit for response length
-        "top_p": 0.1,  # Reduce sampling to make the response more focused
-        "top_k": 20,  # Reduce the number of highest probability tokens considered
+        "temperature": 0,
+        "max_tokens": 1500,
+        "top_p": 0.3,
+        "top_k": 45,
         "stream": False
     })
     
@@ -84,10 +111,8 @@ def call_arli_api(user_input, context, api_key):
 
     # Check if the response was successful
     if response.status_code == 200:
-        # Extract and return the assistant's response
         return response.json()['choices'][0]['message']['content']
     else:
-        # If the request failed, return an error message
         return "Error: Unable to fetch response from ArliAI."
 
 # Streamlit interface
@@ -97,71 +122,67 @@ def run_streamlit_app():
     # Sidebar for document upload and API key input
     with st.sidebar:
         st.header("Upload Your Document & Enter API Key")
-        
-        # Upload the document
         uploaded_file = st.file_uploader("Upload Document (Word .docx)", type=["docx"])
-        
-        # Input for ArliAI API key
         api_key = st.text_input("Enter your ArliAI API Key:", type="password")
-        
-        # Submit button to process the document
         submit_button = st.button("Submit")
     
+    # Initialize session state variables
+    if "chat_enabled" not in st.session_state:
+        st.session_state.chat_enabled = False
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if "doc_chunks" not in st.session_state:
+        st.session_state.doc_chunks = None
+
     # Handle document processing and API key submission
     if uploaded_file is not None and api_key and submit_button:
-        # Process the document and create embeddings
-        process_and_save_document(uploaded_file)
-        st.session_state.api_key = api_key  # Save the API key in session
+        doc_chunks = process_and_save_document(uploaded_file)
+        st.session_state.api_key = api_key
         st.session_state.chat_enabled = True
-        st.session_state.chat_history = []  # Initialize chat history
-
+        st.session_state.chat_history = []
+        st.session_state.doc_chunks = doc_chunks
         st.success("Document processed and chat enabled!")
     
     # Check if chat is enabled
-    if 'chat_enabled' in st.session_state and st.session_state.chat_enabled:
-        # Load embeddings and index for subsequent runs
+    if st.session_state.chat_enabled:
         doc_embeddings, index = load_embeddings_and_index()
-        doc_text = load_docx(uploaded_file)  # Load text from the document
+        doc_chunks = st.session_state.doc_chunks
 
-        # Display chat history with styling
-        if 'chat_history' in st.session_state:
+        # Display chat history
+        if st.session_state.chat_history:
             for user_msg, bot_msg in st.session_state.chat_history:
-                st.markdown(f"<div style='background-color: #f1f1f1; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>"
+                st.markdown(f"<div style='background-color: #525151; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>"
                             f"<strong>User:</strong> {user_msg}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='background-color: #d8eaff; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>"
+                st.markdown(f"<div style='background-color: #364e6b; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>"
                             f"<strong>Bot:</strong> {bot_msg}</div>", unsafe_allow_html=True)
         
-        # Input box to ask questions with placeholder
-        user_input = st.text_input("Ask a question:", placeholder="Type your question here...", key="user_input", help="Type your question and press Enter.")
+        user_input = st.text_input("Ask a question:", placeholder="Type your question here...", key="user_input")
         
         if user_input:
-            # Retrieve relevant text from the document
-            relevant_text = retrieve_relevant_text(user_input, index, doc_text)
+            relevant_texts = retrieve_relevant_texts(user_input, index, doc_chunks, top_k=3)
+            combined_context = "\n".join(relevant_texts)
 
-            # Show loading message while waiting for API response
             with st.spinner('Bot is thinking...'):
-                # Generate answer using ArliAI API
-                answer = call_arli_api(user_input, relevant_text, st.session_state.api_key)
+                answer = call_arli_api(user_input, combined_context, st.session_state.api_key)
             
-            # Display the generated answer with styled chat bubbles
-            st.session_state.chat_history.append((user_input, answer))  # Save to chat history
-            st.markdown(f"<div style='background-color: #f1f1f1; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>"
+            st.session_state.chat_history.append((user_input, answer))
+            st.markdown(f"<div style='background-color:#525151; padding: 10px; border-radius: 10px;'>"
                         f"<strong>User:</strong> {user_input}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div style='background-color: #d8eaff; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>"
+            st.markdown(f"<div style='background-color: #364e6b; padding: 10px; border-radius: 10px;'>"
                         f"<strong>Bot:</strong> {answer}</div>", unsafe_allow_html=True)
 
-            # Button to show the source of the answer
             if st.button("Show source of truth"):
-                st.write(f"Source: {relevant_text}")
-    
+                st.write(f"Source: {combined_context}")
     else:
         st.warning("Please upload a document and enter the API key to enable chat.")
 
-# Function to retrieve relevant text based on a query
-def retrieve_relevant_text(query, index, doc_text):
+# Function to retrieve relevant texts based on a query
+def retrieve_relevant_texts(query, index, doc_text, top_k=3):
     query_embedding = model.encode([query])
-    _, indices = index.search(np.array(query_embedding).astype(np.float32), k=1)
-    return doc_text[indices[0][0]]  # Retrieve the most relevant paragraph
+    _, indices = index.search(np.array(query_embedding).astype(np.float32), k=top_k)
+    L = (doc_text[idx] for idx in indices[0] if idx < len(doc_text))
+    print(L)
+    return L
 
 # Run the Streamlit app
 if __name__ == "__main__":
