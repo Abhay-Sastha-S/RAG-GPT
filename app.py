@@ -80,7 +80,8 @@ def call_arli_api(user_input, context, api_key):
     
     # Ensure context is directly related to the document
     system_message = (
-        "You are a helpful assistant. Please answer the user's question using only the information from the provided extract. "
+        "You are a helpful assistant. Please answer the user's question using only the information from the provided extract from the new Indian Penal Code called the Bharatiya Nyaaya Samhita. "
+        "forget About indian penal code that you know before answering this"
         "Do not invent any information or hallucinate. Stick strictly to the content in the document."
     )
     
@@ -177,7 +178,7 @@ def run_streamlit_app():
         st.warning("Please upload a document and enter the API key to enable chat.")
 
 # Function to retrieve relevant texts based on a query
-def retrieve_relevant_texts(query, index, doc_text, top_k=3):
+def retrieve_relevant_texts(query, index, doc_text, top_k=1):
     query_embedding = model.encode([query])
     _, indices = index.search(np.array(query_embedding).astype(np.float32), k=top_k)
     L = (doc_text[idx] for idx in indices[0] if idx < len(doc_text))
